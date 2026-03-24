@@ -19,8 +19,8 @@ struct MenuBarLabel: View {
     var body: some View {
         HStack(spacing: 4) {
             Image(systemName: monitor.hasPhysicalExternalDisplay
-                  ? "exclamationmark.triangle" : "checkmark.circle")
-            Text(monitor.hasPhysicalExternalDisplay ? "实体" : "安全")
+                  ? "checkmark.circle" : "exclamationmark.triangle")
+            Text(monitor.hasPhysicalExternalDisplay ? "实体" : "虚拟")
                 .font(.caption)
         }
     }
@@ -32,9 +32,9 @@ struct MenuContentView: View {
     var body: some View {
         // Status header
         if monitor.hasPhysicalExternalDisplay {
-            Label("⚠️ 有实体显示器活跃!", systemImage: "exclamationmark.triangle.fill")
+            Label("✅ 实体显示器活跃", systemImage: "checkmark.circle.fill")
         } else {
-            Label("✅ 安全 - 仅虚拟/内置显示器", systemImage: "checkmark.circle.fill")
+            Label("⚠️ 当前仅虚拟/内置显示器", systemImage: "exclamationmark.triangle.fill")
         }
 
         Divider()
@@ -81,6 +81,11 @@ struct MenuContentView: View {
             Text("未检测到显示器")
                 .foregroundColor(.secondary)
         }
+
+        Divider()
+
+        Toggle("虚拟显示器时显示 Dock", isOn: $monitor.autoDockEnabled)
+            .help("开启后：仅虚拟/内置显示器时显示 Dock，有实体显示器时自动隐藏 Dock")
 
         Divider()
 

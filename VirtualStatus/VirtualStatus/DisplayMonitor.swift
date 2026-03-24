@@ -22,6 +22,14 @@ struct DisplayInfo: Identifiable {
 class DisplayMonitor: ObservableObject {
     @Published var displays: [DisplayInfo] = []
     @Published var hasPhysicalExternalDisplay: Bool = false
+    @Published var autoDockEnabled: Bool = false {
+        didSet {
+            UserDefaults.standard.set(autoDockEnabled, forKey: autoDockDefaultsKey)
+            if autoDockEnabled {
+                applyDockPolicy()
+            }
+        }
+    }
 
     // Known virtual display vendor/model pairs
     // BetterDisplay virtual displays use specific IDs
@@ -29,9 +37,11 @@ class DisplayMonitor: ObservableObject {
     private var knownVirtualKeys: Set<String> = []
 
     private let virtualKeysDefaultsKey = "knownVirtualDisplayKeys"
+    private let autoDockDefaultsKey = "autoDockEnabled"
 
     init() {
         loadKnownVirtualKeys()
+        autoDockEnabled = UserDefaults.standard.bool(forKey: autoDockDefaultsKey)
         updateDisplays()
         registerCallback()
     }
@@ -72,6 +82,40 @@ class DisplayMonitor: ObservableObject {
 
         displays = newDisplays
         hasPhysicalExternalDisplay = newDisplays.contains { $0.type == .external }
+
+        if autoDockEnabled {
+            applyDockPolicy()
+        }
+    }
+
+    // MARK: - Dock control
+
+    /// If only virtual/built-in displays → show Dock; if any physical external → hide Dock
+    private func applyDockPolicy() {
+        let shouldHideDock = hasPhysicalExternalDisplay
+        setDockAutoHide(shouldHideDock)
+    }
+
+    private func setDockAutoHide(_ hide: Bool) {
+        let value = hide ? "true" : "false"
+
+        let setTask = Process()
+        setTask.launchPath = "/usr/bin/defaults"
+        setTask.arguments = ["write", "com.apple.dock", "autohide", "-bool", value]
+
+        do {
+            try setTask.run()
+            setTask.waitUntilExit()
+
+            // 重启 Dock 使设置生效
+            let killTask = Process()
+            killTask.launchPath = "/usr/bin/killall"
+            killTask.arguments = ["Dock"]
+            try killTask.run()
+            killTask.waitUntilExit()
+        } catch {
+            print("Error setting dock autohide: \(error)")
+        }
     }
 
     // MARK: - Virtual display management
