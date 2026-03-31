@@ -87,6 +87,9 @@ struct MenuContentView: View {
         Toggle("虚拟显示器时显示 Dock", isOn: $monitor.autoDockEnabled)
             .help("开启后：仅虚拟/内置显示器时显示 Dock，有实体显示器时自动隐藏 Dock")
 
+        Toggle("自动切换输入法快捷键", isOn: $monitor.autoInputShortcutEnabled)
+            .help("开启后：实体显示器时用 F19，虚拟显示器时用 ⌃Space")
+
         Divider()
 
         Button("刷新") {

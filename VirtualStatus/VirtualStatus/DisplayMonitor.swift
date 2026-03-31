@@ -31,6 +31,15 @@ class DisplayMonitor: ObservableObject {
         }
     }
 
+    @Published var autoInputShortcutEnabled: Bool = false {
+        didSet {
+            UserDefaults.standard.set(autoInputShortcutEnabled, forKey: autoInputShortcutDefaultsKey)
+            if autoInputShortcutEnabled {
+                applyInputShortcutPolicy()
+            }
+        }
+    }
+
     // Known virtual display vendor/model pairs
     // BetterDisplay virtual displays use specific IDs
     // Users can add more via the menu
@@ -38,10 +47,12 @@ class DisplayMonitor: ObservableObject {
 
     private let virtualKeysDefaultsKey = "knownVirtualDisplayKeys"
     private let autoDockDefaultsKey = "autoDockEnabled"
+    private let autoInputShortcutDefaultsKey = "autoInputShortcutEnabled"
 
     init() {
         loadKnownVirtualKeys()
         autoDockEnabled = UserDefaults.standard.bool(forKey: autoDockDefaultsKey)
+        autoInputShortcutEnabled = UserDefaults.standard.bool(forKey: autoInputShortcutDefaultsKey)
         updateDisplays()
         registerCallback()
     }
@@ -86,6 +97,9 @@ class DisplayMonitor: ObservableObject {
         if autoDockEnabled {
             applyDockPolicy()
         }
+        if autoInputShortcutEnabled {
+            applyInputShortcutPolicy()
+        }
     }
 
     // MARK: - Dock control
@@ -115,6 +129,53 @@ class DisplayMonitor: ObservableObject {
             killTask.waitUntilExit()
         } catch {
             print("Error setting dock autohide: \(error)")
+        }
+    }
+
+    // MARK: - Input source shortcut control
+
+    /// Physical external → F19; virtual/built-in only → ⌃Space
+    private func applyInputShortcutPolicy() {
+        if hasPhysicalExternalDisplay {
+            // F19: charCode=65535, keyCode=80, modifiers=0
+            setInputSourceShortcut(keyCode: 80, charCode: 65535, modifiers: 0)
+        } else {
+            // ⌃Space: charCode=32, keyCode=49, modifiers=262144
+            setInputSourceShortcut(keyCode: 49, charCode: 32, modifiers: 262144)
+        }
+    }
+
+    private func setInputSourceShortcut(keyCode: Int, charCode: Int, modifiers: Int) {
+        let plistValue = """
+        <dict>
+          <key>enabled</key><true/>
+          <key>value</key><dict>
+            <key>type</key><string>standard</string>
+            <key>parameters</key><array>
+              <integer>\(charCode)</integer>
+              <integer>\(keyCode)</integer>
+              <integer>\(modifiers)</integer>
+            </array>
+          </dict>
+        </dict>
+        """
+
+        let writeTask = Process()
+        writeTask.launchPath = "/usr/bin/defaults"
+        writeTask.arguments = ["write", "com.apple.symbolichotkeys", "AppleSymbolicHotKeys", "-dict-add", "60", plistValue]
+
+        do {
+            try writeTask.run()
+            writeTask.waitUntilExit()
+
+            // 激活设置使其立即生效
+            let activateTask = Process()
+            activateTask.launchPath = "/System/Library/PrivateFrameworks/SystemAdministration.framework/Resources/activateSettings"
+            activateTask.arguments = ["-u"]
+            try activateTask.run()
+            activateTask.waitUntilExit()
+        } catch {
+            print("Error setting input source shortcut: \(error)")
         }
     }
 
