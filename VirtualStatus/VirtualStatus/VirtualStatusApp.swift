@@ -90,6 +90,9 @@ struct MenuContentView: View {
         Toggle("自动切换输入法快捷键", isOn: $monitor.autoInputShortcutEnabled)
             .help("开启后：实体显示器时用 F19，虚拟显示器时用 ⌃Space")
 
+        Toggle("自动管理 LinearMouse", isOn: $monitor.autoLinearMouseEnabled)
+            .help("开启后：实体显示器时自动启动 LinearMouse，虚拟显示器时自动关闭")
+
         Divider()
 
         Button("刷新") {

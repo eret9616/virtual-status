@@ -1,6 +1,7 @@
 import Foundation
 import CoreGraphics
 import IOKit
+import AppKit
 
 enum DisplayType: String {
     case builtIn = "内置显示器"
@@ -40,6 +41,15 @@ class DisplayMonitor: ObservableObject {
         }
     }
 
+    @Published var autoLinearMouseEnabled: Bool = false {
+        didSet {
+            UserDefaults.standard.set(autoLinearMouseEnabled, forKey: autoLinearMouseDefaultsKey)
+            if autoLinearMouseEnabled {
+                applyLinearMousePolicy()
+            }
+        }
+    }
+
     // Known virtual display vendor/model pairs
     // BetterDisplay virtual displays use specific IDs
     // Users can add more via the menu
@@ -48,11 +58,13 @@ class DisplayMonitor: ObservableObject {
     private let virtualKeysDefaultsKey = "knownVirtualDisplayKeys"
     private let autoDockDefaultsKey = "autoDockEnabled"
     private let autoInputShortcutDefaultsKey = "autoInputShortcutEnabled"
+    private let autoLinearMouseDefaultsKey = "autoLinearMouseEnabled"
 
     init() {
         loadKnownVirtualKeys()
         autoDockEnabled = UserDefaults.standard.bool(forKey: autoDockDefaultsKey)
         autoInputShortcutEnabled = UserDefaults.standard.bool(forKey: autoInputShortcutDefaultsKey)
+        autoLinearMouseEnabled = UserDefaults.standard.bool(forKey: autoLinearMouseDefaultsKey)
         updateDisplays()
         registerCallback()
     }
@@ -99,6 +111,9 @@ class DisplayMonitor: ObservableObject {
         }
         if autoInputShortcutEnabled {
             applyInputShortcutPolicy()
+        }
+        if autoLinearMouseEnabled {
+            applyLinearMousePolicy()
         }
     }
 
@@ -176,6 +191,42 @@ class DisplayMonitor: ObservableObject {
             activateTask.waitUntilExit()
         } catch {
             print("Error setting input source shortcut: \(error)")
+        }
+    }
+
+    // MARK: - LinearMouse control
+
+    /// Physical external → ensure LinearMouse is running; virtual/built-in only → quit LinearMouse
+    private func applyLinearMousePolicy() {
+        let isRunning = isLinearMouseRunning()
+        if hasPhysicalExternalDisplay {
+            if !isRunning {
+                launchLinearMouse()
+            }
+        } else {
+            if isRunning {
+                quitLinearMouse()
+            }
+        }
+    }
+
+    private func isLinearMouseRunning() -> Bool {
+        NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == "com.lujjjh.LinearMouse" }
+    }
+
+    private func launchLinearMouse() {
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.lujjjh.LinearMouse") {
+            NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration()) { _, error in
+                if let error = error {
+                    print("Error launching LinearMouse: \(error)")
+                }
+            }
+        }
+    }
+
+    private func quitLinearMouse() {
+        for app in NSWorkspace.shared.runningApplications where app.bundleIdentifier == "com.lujjjh.LinearMouse" {
+            app.terminate()
         }
     }
 
