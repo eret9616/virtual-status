@@ -2,6 +2,7 @@ import Foundation
 import CoreGraphics
 import IOKit
 import AppKit
+import ApplicationServices
 
 enum DisplayType: String {
     case builtIn = "内置显示器"
@@ -41,12 +42,19 @@ class DisplayMonitor: ObservableObject {
         }
     }
 
-    @Published var autoLinearMouseEnabled: Bool = false {
+    /// 远程(仅虚拟屏)时放慢滚动
+    @Published var autoSlowScrollEnabled: Bool = false {
         didSet {
-            UserDefaults.standard.set(autoLinearMouseEnabled, forKey: autoLinearMouseDefaultsKey)
-            if autoLinearMouseEnabled {
-                applyLinearMousePolicy()
-            }
+            UserDefaults.standard.set(autoSlowScrollEnabled, forKey: autoSlowScrollDefaultsKey)
+            applyScrollPolicy()
+        }
+    }
+
+    /// 滚动缩放系数（<1 变慢），默认 0.2
+    @Published var scrollSlowFactor: Double = 0.2 {
+        didSet {
+            UserDefaults.standard.set(scrollSlowFactor, forKey: scrollSlowFactorDefaultsKey)
+            scrollFactor = scrollSlowFactor
         }
     }
 
@@ -58,13 +66,34 @@ class DisplayMonitor: ObservableObject {
     private let virtualKeysDefaultsKey = "knownVirtualDisplayKeys"
     private let autoDockDefaultsKey = "autoDockEnabled"
     private let autoInputShortcutDefaultsKey = "autoInputShortcutEnabled"
-    private let autoLinearMouseDefaultsKey = "autoLinearMouseEnabled"
+    private let autoSlowScrollDefaultsKey = "autoSlowScrollEnabled"
+    private let scrollSlowFactorDefaultsKey = "scrollSlowFactor"
+
+    // MARK: - Scroll tap state (accessed from the C event-tap callback thread)
+    nonisolated(unsafe) private var scrollTap: CFMachPort?
+    nonisolated(unsafe) private var scrollRunLoopSource: CFRunLoopSource?
+    nonisolated(unsafe) private var scrollFactor: Double = 0.2
+    // 整数增量缩放后不足 1 的余数累加，避免慢速滚动被取整成 0 而卡住
+    nonisolated(unsafe) private var accumLine1 = 0.0
+    nonisolated(unsafe) private var accumLine2 = 0.0
+    nonisolated(unsafe) private var accumPoint1 = 0.0
+    nonisolated(unsafe) private var accumPoint2 = 0.0
 
     init() {
         loadKnownVirtualKeys()
         autoDockEnabled = UserDefaults.standard.bool(forKey: autoDockDefaultsKey)
         autoInputShortcutEnabled = UserDefaults.standard.bool(forKey: autoInputShortcutDefaultsKey)
-        autoLinearMouseEnabled = UserDefaults.standard.bool(forKey: autoLinearMouseDefaultsKey)
+        // 未设置过时默认开启（只有纯虚拟屏/远程时才真正激活）
+        if UserDefaults.standard.object(forKey: autoSlowScrollDefaultsKey) != nil {
+            autoSlowScrollEnabled = UserDefaults.standard.bool(forKey: autoSlowScrollDefaultsKey)
+        } else {
+            autoSlowScrollEnabled = true
+        }
+        // scrollSlowFactor 未设置过时保留默认 0.2
+        if UserDefaults.standard.object(forKey: scrollSlowFactorDefaultsKey) != nil {
+            scrollSlowFactor = UserDefaults.standard.double(forKey: scrollSlowFactorDefaultsKey)
+        }
+        scrollFactor = scrollSlowFactor
         updateDisplays()
         registerCallback()
     }
@@ -81,6 +110,7 @@ class DisplayMonitor: ObservableObject {
         var newDisplays: [DisplayInfo] = []
 
         for displayID in activeIDs {
+            let edidName = displayName(for: displayID)
             let type = detectDisplayType(displayID)
             let width = CGDisplayPixelsWide(displayID)
             let height = CGDisplayPixelsHigh(displayID)
@@ -88,8 +118,7 @@ class DisplayMonitor: ObservableObject {
             let model = CGDisplayModelNumber(displayID)
             let serial = CGDisplaySerialNumber(displayID)
 
-            let name = displayName(for: displayID)
-                ?? "Display \(displayID)"
+            let name = edidName ?? "Display \(displayID)"
 
             let info = DisplayInfo(
                 id: displayID,
@@ -112,9 +141,104 @@ class DisplayMonitor: ObservableObject {
         if autoInputShortcutEnabled {
             applyInputShortcutPolicy()
         }
-        if autoLinearMouseEnabled {
-            applyLinearMousePolicy()
+        applyScrollPolicy()
+    }
+
+    // MARK: - Slow scroll (remote) control
+
+    /// 仅当开启且当前只有虚拟屏（远程中）才放慢滚动
+    private func applyScrollPolicy() {
+        let shouldSlow = autoSlowScrollEnabled && !hasPhysicalExternalDisplay
+        if shouldSlow {
+            scrollFactor = scrollSlowFactor
+            enableScrollTap()
+        } else {
+            disableScrollTap()
         }
+    }
+
+    private func enableScrollTap() {
+        if scrollTap == nil {
+            let mask = (1 << CGEventType.scrollWheel.rawValue)
+            guard let tap = CGEvent.tapCreate(
+                tap: .cgSessionEventTap,
+                place: .headInsertEventTap,
+                options: .defaultTap,
+                eventsOfInterest: CGEventMask(mask),
+                callback: { _, type, event, userInfo in
+                    guard let userInfo else { return Unmanaged.passUnretained(event) }
+                    let monitor = Unmanaged<DisplayMonitor>.fromOpaque(userInfo).takeUnretainedValue()
+                    return monitor.processScroll(type: type, event: event)
+                },
+                userInfo: Unmanaged.passUnretained(self).toOpaque()
+            ) else {
+                // 创建失败：几乎都是没授予「辅助功能」权限
+                print("scroll tap 创建失败——请在 系统设置>隐私与安全性>辅助功能 勾选 VirtualStatus")
+                promptAccessibilityIfNeeded()
+                return
+            }
+            scrollTap = tap
+            let src = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+            scrollRunLoopSource = src
+            CFRunLoopAddSource(CFRunLoopGetMain(), src, .commonModes)
+        }
+        if let tap = scrollTap {
+            CGEvent.tapEnable(tap: tap, enable: true)
+        }
+    }
+
+    private func disableScrollTap() {
+        if let tap = scrollTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+        }
+        accumLine1 = 0; accumLine2 = 0; accumPoint1 = 0; accumPoint2 = 0
+    }
+
+    /// 在事件 tap 回调线程上执行，只能访问 nonisolated 状态
+    nonisolated private func processScroll(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        // tap 被系统禁用时（超时/用户输入）需要重新启用
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let tap = scrollTap {
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
+            return Unmanaged.passUnretained(event)
+        }
+        guard type == .scrollWheel else {
+            return Unmanaged.passUnretained(event)
+        }
+
+        let f = scrollFactor
+
+        // 固定小数增量（Double）：直接缩放
+        let fx1 = event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1)
+        let fx2 = event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2)
+        event.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1, value: fx1 * f)
+        event.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2, value: fx2 * f)
+
+        // 像素增量（Int，连续滚动/触控板风格）：带余数累加
+        accumPoint1 += Double(event.getIntegerValueField(.scrollWheelEventPointDeltaAxis1)) * f
+        let op1 = Int64(accumPoint1); accumPoint1 -= Double(op1)
+        event.setIntegerValueField(.scrollWheelEventPointDeltaAxis1, value: op1)
+
+        accumPoint2 += Double(event.getIntegerValueField(.scrollWheelEventPointDeltaAxis2)) * f
+        let op2 = Int64(accumPoint2); accumPoint2 -= Double(op2)
+        event.setIntegerValueField(.scrollWheelEventPointDeltaAxis2, value: op2)
+
+        // 行增量（Int，经典滚轮）：带余数累加
+        accumLine1 += Double(event.getIntegerValueField(.scrollWheelEventDeltaAxis1)) * f
+        let ol1 = Int64(accumLine1); accumLine1 -= Double(ol1)
+        event.setIntegerValueField(.scrollWheelEventDeltaAxis1, value: ol1)
+
+        accumLine2 += Double(event.getIntegerValueField(.scrollWheelEventDeltaAxis2)) * f
+        let ol2 = Int64(accumLine2); accumLine2 -= Double(ol2)
+        event.setIntegerValueField(.scrollWheelEventDeltaAxis2, value: ol2)
+
+        return Unmanaged.passUnretained(event)
+    }
+
+    private func promptAccessibilityIfNeeded() {
+        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+        _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
     }
 
     // MARK: - Dock control
@@ -194,41 +318,6 @@ class DisplayMonitor: ObservableObject {
         }
     }
 
-    // MARK: - LinearMouse control
-
-    private func applyLinearMousePolicy() {
-        let isRunning = isLinearMouseRunning()
-        if hasPhysicalExternalDisplay {
-            if !isRunning {
-                launchLinearMouse()
-            }
-        } else {
-            if isRunning {
-                quitLinearMouse()
-            }
-        }
-    }
-
-    private func isLinearMouseRunning() -> Bool {
-        NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == "com.lujjjh.LinearMouse" }
-    }
-
-    private func launchLinearMouse() {
-        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.lujjjh.LinearMouse") {
-            NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration()) { _, error in
-                if let error = error {
-                    print("Error launching LinearMouse: \(error)")
-                }
-            }
-        }
-    }
-
-    private func quitLinearMouse() {
-        for app in NSWorkspace.shared.runningApplications where app.bundleIdentifier == "com.lujjjh.LinearMouse" {
-            app.terminate()
-        }
-    }
-
     // MARK: - Virtual display management
 
     /// Mark a display as virtual (persisted)
@@ -288,14 +377,24 @@ class DisplayMonitor: ObservableObject {
         return .external
     }
 
+    // BetterDisplay 给它创建的虚拟屏统一使用厂商 ID 2198 (0x896)。
+    // 已从 BetterDisplay 偏好设置 systemVirtual=1 的记录核实：
+    // Virtual 16:10 = vendor 2198；真实体屏 vendor 均不为 2198
+    // (Mi 245 HF=25001, ASUS VX24G26J=23139, Generic Display=2533, 内置=1552)。
+    private static let betterDisplayVendorID: UInt32 = 2198
+
     private func isLikelyVirtualDisplay(vendor: UInt32, model: UInt32, serial: UInt32) -> Bool {
+        // BetterDisplay 虚拟屏（任意 model，含以后新建的）
+        if vendor == Self.betterDisplayVendorID {
+            return true
+        }
+
         // Vendor 0, model 0 is almost certainly virtual
         if vendor == 0 && model == 0 {
             return true
         }
 
-        // CGVirtualDisplay (used by BetterDisplay) creates displays with
-        // vendor 0xFFFFFFFF or 0x0 in some cases
+        // CGVirtualDisplay creates displays with vendor 0xFFFFFFFF in some cases
         if vendor == 0xFFFFFFFF {
             return true
         }
