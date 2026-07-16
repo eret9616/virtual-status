@@ -90,17 +90,6 @@ struct MenuContentView: View {
         Toggle("自动切换输入法快捷键", isOn: $monitor.autoInputShortcutEnabled)
             .help("开启后：实体显示器时用 F19，虚拟显示器时用 ⌃Space")
 
-        Toggle("远程时放慢滚动", isOn: $monitor.autoSlowScrollEnabled)
-            .help("开启后：仅虚拟屏（远程）时按下方系数放慢滚动；接实体屏时不影响。需在 系统设置>隐私与安全性>辅助功能 授权")
-
-        if monitor.autoSlowScrollEnabled {
-            Picker("滚动速度", selection: $monitor.scrollSlowFactor) {
-                Text("很慢 (0.2)").tag(0.2)
-                Text("慢 (0.3)").tag(0.3)
-                Text("稍慢 (0.5)").tag(0.5)
-            }
-        }
-
         Divider()
 
         Button("刷新") {
